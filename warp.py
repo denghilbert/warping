@@ -82,6 +82,7 @@ def backproject_depth(depth, inv_K, height, width, if_mitsuba_depth=False):
     
     Returns:
         cam_points (torch.Tensor): (H, W, 4) 3D points in homogeneous coordinates.
+        if_mitsuba_depth, depth_correct: (H, W, 3) the corrected depth map
     """
     y, x = torch.meshgrid(torch.arange(height, dtype=torch.float32, device=depth.device),
                           torch.arange(width, dtype=torch.float32, device=depth.device),
@@ -97,7 +98,10 @@ def backproject_depth(depth, inv_K, height, width, if_mitsuba_depth=False):
     cam_points = depth * cam_points  # (H, W, 3)
     cam_points = torch.cat([cam_points, torch.ones_like(cam_points[..., :1])], dim=-1)
     
-    return cam_points
+    if if_mitsuba_depth:
+        return cam_points, depth
+    else:
+        return cam_points
 
 def warp_image(img, pts_mapping, mode='bilinear', align_corners=False):
     """
