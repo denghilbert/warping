@@ -2,12 +2,14 @@ import OpenEXR
 import Imath
 import numpy as np
 import cv2
+import pyexr
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
 import json
 from PIL import Image
+from typing import Tuple
 
 
 def to_homogeneous(points):
@@ -214,3 +216,77 @@ def render_image_torch(source_pts, source_rgb, target_w2c, K, img_size=(1024, 10
                 depth_buffer[v, u] = depth
 
     return rendered_img
+
+def generate_spiral_trajectory(num_points=100, max_distance=1.0, spiral_radius=0.2, revolutions=2, device='cpu'):
+    """
+    Generates a spiral trajectory in camera coordinates (x right, y down, z forward).
+    
+    The trajectory starts at the camera center (0,0,0), spirals forward to a maximum distance,
+    and then returns to the camera center.
+    
+    Args:
+        num_points (int): Number of points in the trajectory
+        max_distance (float): Maximum forward distance (z) to travel
+        spiral_radius (float): Maximum radius of the spiral
+        revolutions (float): Number of full revolutions in the spiral
+        device (str): PyTorch device ('cuda' or 'cpu')
+        
+    Returns:
+        torch.Tensor: Trajectory points with shape (num_points, 3)
+    """
+    # Parameter t goes from 0 to 2 (0->1 for going out, 1->2 for coming back)
+    t = torch.linspace(0, 2, num_points, device=device)
+    
+    # Forward distance (z) follows a sine curve to go out and back
+    z = max_distance * torch.sin(torch.pi * t / 2)
+    
+    # Radius of the spiral varies with t (grows and then shrinks)
+    radius = spiral_radius * torch.sin(torch.pi * t)
+    
+    # Angular position (more revolutions on the way out and back)
+    theta = 2 * torch.pi * revolutions * t
+    
+    # Convert to Cartesian coordinates
+    x = radius * torch.cos(theta)
+    y = radius * torch.sin(theta)
+    
+    # Stack coordinates to create trajectory
+    trajectory = torch.stack([x, y, z], dim=1)
+    
+    return trajectory
+
+def create_camera_poses_from_trajectory(trajectory, initial_c2w):
+    """
+    Creates camera poses for each point in a trajectory while maintaining the same look-at direction.
+    
+    Args:
+        trajectory (torch.Tensor): Homogeneous trajectory points with shape (num_points, 4)
+        initial_c2w (torch.Tensor): Initial camera-to-world matrix of shape (4, 4)
+        
+    Returns:
+        torch.Tensor: Camera-to-world matrices for each trajectory point, shape (num_points, 4, 4)
+    """
+    num_points = trajectory.shape[0]
+    device = trajectory.device
+    
+    # Extract rotation part (first 3x3) from initial camera matrix
+    R = initial_c2w[:3, :3]
+    
+    # Create empty tensor to store all camera poses
+    w2c_matrices = torch.zeros((num_points, 4, 4), device=device)
+    
+    # For each point in the trajectory
+    for i in range(num_points):
+        # Create new c2w matrix
+        c2w = torch.eye(4, device=device)
+        
+        # Copy rotation (keep the same orientation/look-at direction)
+        c2w[:3, :3] = R
+        
+        # Set the new camera center (translation)
+        c2w[:3, 3] = trajectory[i, :3]
+        
+        # Store in the result tensor
+        w2c_matrices[i] = c2w.inverse()
+    
+    return w2c_matrices
