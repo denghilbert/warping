@@ -217,6 +217,112 @@ def render_image_torch(source_pts, source_rgb, target_w2c, K, img_size=(1024, 10
 
     return rendered_img
 
+def render_image_torch_grid_sample(source_pts, source_rgb, target_w2c, K, img_size=(1024, 1024)):
+    """
+    Renders an image from homogeneous world points and colors using torch.nn.functional.grid_sample.
+    
+    Parameters:
+        source_pts (torch.Tensor): Homogeneous points of shape (H, W, 4), dtype=torch.float32
+        source_rgb (torch.Tensor): Color image of shape (H, W, 3), dtype=torch.uint8
+        target_w2c (torch.Tensor): World-to-camera extrinsic matrix (4x4), dtype=torch.float32
+        K (torch.Tensor): Intrinsic matrix (3x3), dtype=torch.float32
+        img_size (tuple): (height, width) for the rendered image
+        
+    Returns:
+        rendered_img (torch.Tensor): The rendered image with shape (H, W, 3), dtype=torch.uint8
+    """
+    import torch.nn.functional as F
+    
+    # Ensure tensors are on the same device
+    device = source_pts.device
+    source_rgb = source_rgb.to(device)
+    target_w2c = target_w2c.to(device)
+    K = K.to(device)
+    
+    H, W = img_size
+    H_src, W_src = source_rgb.shape[:2]
+    
+    # Convert homogeneous points (H, W, 4) to 3D points (H, W, 3)
+    pts_xyz = source_pts[..., :3] / torch.clamp(source_pts[..., 3:], min=1e-6)
+    
+    # Flatten points and convert to homogeneous coordinates
+    pts_flat = pts_xyz.reshape(-1, 3)  # (H_src*W_src, 3)
+    ones = torch.ones((pts_flat.shape[0], 1), device=device, dtype=torch.float32)
+    pts_h_flat = torch.cat([pts_flat, ones], dim=-1)  # (H_src*W_src, 4)
+    
+    # Transform points from world to camera coordinates
+    cam_pts_h_flat = (target_w2c @ pts_h_flat.T).T  # (H_src*W_src, 4)
+    cam_pts_flat = cam_pts_h_flat[:, :3]  # (H_src*W_src, 3)
+    
+    # Project to 2D image plane using intrinsic matrix K
+    proj_flat = (K @ cam_pts_flat.T).T  # (H_src*W_src, 3)
+    proj_xy_flat = proj_flat[:, :2] / torch.clamp(proj_flat[:, 2:], min=1e-6)  # (H_src*W_src, 2)
+    
+    # Create source coordinates grid (for sampling source RGB)
+    y_src, x_src = torch.meshgrid(torch.arange(H_src, device=device), torch.arange(W_src, device=device))
+    source_coords = torch.stack([x_src, y_src], dim=-1).float()  # (H_src, W_src, 2)
+    source_coords_flat = source_coords.reshape(-1, 2)  # (H_src*W_src, 2)
+    
+    # Normalize source coordinates to [-1, 1] for grid_sample
+    source_coords_ndc = 2.0 * source_coords_flat / torch.tensor([W_src-1, H_src-1], device=device) - 1.0
+    
+    # Round projected coordinates to integers and check which ones are valid
+    proj_xy_int = torch.round(proj_xy_flat).long()  # (H_src*W_src, 2)
+    valid_mask = (proj_xy_int[:, 0] >= 0) & (proj_xy_int[:, 0] < W) & \
+                 (proj_xy_int[:, 1] >= 0) & (proj_xy_int[:, 1] < H)
+    
+    # Filter to keep only valid projections
+    valid_proj_xy_int = proj_xy_int[valid_mask]  # (N_valid, 2)
+    valid_source_coords = source_coords_ndc[valid_mask]  # (N_valid, 2)
+    valid_depths = cam_pts_flat[valid_mask, 2]  # (N_valid,)
+    
+    # Calculate flat indices for each target pixel
+    target_indices = valid_proj_xy_int[:, 1] * W + valid_proj_xy_int[:, 0]  # (N_valid,)
+    
+    # Sort by depth (front to back) for proper occlusion
+    sorted_indices = torch.argsort(valid_depths)
+    valid_source_coords = valid_source_coords[sorted_indices]
+    target_indices = target_indices[sorted_indices]
+    
+    # Create empty sampling grid and fill it with coordinates
+    sampling_grid = torch.zeros((H*W, 2), device=device)
+    
+    # The scatter operation places source coordinates at target pixel locations
+    # Later points (closer to camera) will overwrite earlier ones
+    sampling_grid.scatter_(0, target_indices.unsqueeze(1).repeat(1, 2), valid_source_coords)
+    
+    # Create valid pixel mask
+    valid_pixel_mask = torch.zeros(H*W, dtype=torch.bool, device=device)
+    valid_pixel_mask.scatter_(0, target_indices, torch.ones_like(target_indices, dtype=torch.bool))
+    
+    # Reshape for grid_sample
+    sampling_grid = sampling_grid.reshape(1, H, W, 2)
+    valid_pixel_mask = valid_pixel_mask.reshape(H, W)
+    
+    # Prepare source_rgb for grid_sample
+    source_rgb_batch = source_rgb.float() / 255.0
+    source_rgb_batch = source_rgb_batch.permute(2, 0, 1).unsqueeze(0)  # (1, 3, H_src, W_src)
+    
+    # Sample colors using grid_sample
+    rendered_img = F.grid_sample(
+        source_rgb_batch, 
+        sampling_grid, 
+        mode='nearest',  # Use nearest to match original function
+        padding_mode='zeros', 
+        align_corners=True
+    )
+    
+    # Convert back to image format
+    rendered_img = rendered_img.squeeze(0).permute(1, 2, 0)  # (H, W, 3)
+    
+    # Apply valid pixel mask
+    rendered_img = rendered_img * valid_pixel_mask.unsqueeze(-1).float()
+    
+    # Convert to uint8
+    rendered_img = (rendered_img * 255).byte()
+    
+    return rendered_img
+
 def generate_spiral_trajectory(num_points=100, max_distance=1.0, spiral_radius=0.2, revolutions=2, device='cpu'):
     """
     Generates a spiral trajectory in camera coordinates (x right, y down, z forward).
