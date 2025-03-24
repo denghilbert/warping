@@ -28,8 +28,10 @@ w2c1 = c2w1.inverse()[:3, :]
 
 depth0_to_pts_camera, depth0_corrected = backproject_depth(depth0, K.inverse(), img0.shape[1], img0.shape[0], if_mitsuba_depth=True)
 depth0_to_pts_world = (c2w0.unsqueeze(0).unsqueeze(0) @ depth0_to_pts_camera.unsqueeze(-1)).squeeze(-1)
+depth1_to_pts_camera, _ = backproject_depth(depth1, K.inverse(), img0.shape[1], img0.shape[0], if_mitsuba_depth=True)
+depth1_to_pts_world = (c2w1.unsqueeze(0).unsqueeze(0) @ depth1_to_pts_camera.unsqueeze(-1)).squeeze(-1)
 
-trajectory_camera = generate_spiral_trajectory(num_points=50, max_distance=1.0, spiral_radius=1.0, revolutions=3)
+trajectory_camera = generate_spiral_trajectory(num_points=100, max_distance=.05, spiral_radius=.2, revolutions=2)
 trajectory_camera = torch.cat([trajectory_camera, torch.ones(trajectory_camera.shape[0], 1, device=trajectory_camera.device)], dim=1)
 trajectory_world = (c2w0 @ trajectory_camera.T).T
 spiral_w2c = create_camera_poses_from_trajectory(trajectory_world, c2w0)
@@ -37,5 +39,5 @@ spiral_w2c = create_camera_poses_from_trajectory(trajectory_world, c2w0)
 os.makedirs("spiral", exist_ok=True)
 for i, w2c in enumerate(spiral_w2c):
     img_size = (1024, 1024)
-    rendered_image = render_image_torch(depth0_to_pts_world, img0, w2c, K, img_size)
-    cv2.imwrite(f"spiral/{i}.png", rendered_image.cpu().numpy())
+    rendered_image = render_image_torch(depth1_to_pts_world, img1, w2c, K, img_size)
+    cv2.imwrite(f"spiral/{i}.png", rendered_image.cpu().numpy()[..., ::-1])

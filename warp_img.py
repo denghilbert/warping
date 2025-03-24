@@ -40,7 +40,7 @@ depth0_to_pts_camera, depth0_corrected = backproject_depth(depth0, K.inverse(), 
 depth0_to_pts_world = (c2w0.unsqueeze(0).unsqueeze(0) @ depth0_to_pts_camera.unsqueeze(-1)).squeeze(-1)
 img_size = (1024, 1024)
 rendered_image = render_image_torch(depth0_to_pts_world, img0, w2c1, K, img_size)
-cv2.imwrite("img0_to_img1.png", rendered_image.cpu().numpy())
+cv2.imwrite("img0_to_img1.png", rendered_image.cpu().numpy()[..., ::-1])
 
 # using depth generate mpi for img0
 x_coords = depth0_to_pts_world[..., 0]  # Shape: (1024, 1024)
@@ -55,7 +55,7 @@ for i in range(len(planes) + 1):
     masks.append(mask)
 count = 0
 for mask in masks:
-    cv2.imwrite(f"mpi_img0{count}.png", (img0*mask.unsqueeze(-1)).cpu().numpy())
+    cv2.imwrite(f"mpi_img0{count}.png", (img0*mask.unsqueeze(-1)).cpu().numpy()[..., ::-1])
     count += 1
 
 
@@ -80,6 +80,6 @@ img_size = (1024, 1024)
 count = 0
 for pts, rgb in zip(points_per_plane, rgb_per_plane):
     rendered_image = render_image_torch(pts, rgb, w2c0, K, img_size)
-    cv2.imwrite(f"img1_to_img0_plane{count}.png", rendered_image.cpu().numpy())
+    cv2.imwrite(f"img1_to_img0_plane{count}.png", rendered_image.cpu().numpy()[..., ::-1])
     count += 1
 

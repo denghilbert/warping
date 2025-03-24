@@ -40,11 +40,16 @@ depth1_to_pts_world = (c2w1.unsqueeze(0).unsqueeze(0) @ depth1_to_pts_camera.uns
 
 points = depth0_to_pts_world[..., :3].reshape(-1, 3).numpy()  # Extract XYZ coordinates
 colors = img0.reshape(-1, 3).numpy() / 255.0  # Normalize RGB values
-# points = depth1_to_pts_world[..., :3].reshape(-1, 3).numpy()  # Extract XYZ coordinates
-# colors = img1.reshape(-1, 3).numpy() / 255.0  # Normalize RGB values
 
 import open3d as o3d
 pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(points)
+pcd.colors = o3d.utility.Vector3dVector(colors)
+o3d.visualization.draw_geometries([pcd], window_name="Point Cloud with Color")
+
+
+points = depth1_to_pts_world[..., :3].reshape(-1, 3).numpy()  # Extract XYZ coordinates
+colors = img1.reshape(-1, 3).numpy() / 255.0  # Normalize RGB values
 pcd.points = o3d.utility.Vector3dVector(points)
 pcd.colors = o3d.utility.Vector3dVector(colors)
 o3d.visualization.draw_geometries([pcd], window_name="Point Cloud with Color")
