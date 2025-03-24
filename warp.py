@@ -290,3 +290,158 @@ def create_camera_poses_from_trajectory(trajectory, initial_c2w):
         w2c_matrices[i] = c2w.inverse()
     
     return w2c_matrices
+
+def warp_image_homography(src_img, src_c2w, dst_c2w, K, depth):
+    """
+    Warp an image from source camera to destination camera using homography.
+    
+    Args:
+        src_img: Tensor of shape [H, W, 3] representing the source image.
+        src_c2w: Tensor of shape [4, 4] representing camera-to-world transformation for source camera.
+        dst_c2w: Tensor of shape [4, 4] representing camera-to-world transformation for destination camera.
+        K: Tensor of shape [3, 3] representing camera intrinsic matrix (assumed same for both cameras).
+        depth: Float representing the distance from source camera to the image plane.
+        
+    Returns:
+        warped_img: Tensor of shape [H, W, 3] representing the warped image.
+    """
+    height, width, _ = src_img.shape
+    device = src_img.device
+    
+    # Convert src_img to float if it's not already
+    if src_img.dtype != torch.float32:
+        src_img = src_img.float()
+        
+        # If it was originally uint8 (0-255), normalize to 0-1 range
+        if src_img.max() > 1.0:
+            src_img = src_img / 255.0
+    
+    # Convert camera-to-world to world-to-camera
+    src_w2c = torch.inverse(src_c2w)  # Source world-to-camera
+    dst_w2c = torch.inverse(dst_c2w)  # Destination world-to-camera
+    
+    # Extract rotation and translation for both cameras
+    R_src = src_w2c[:3, :3]  # Rotation for source camera
+    t_src = src_w2c[:3, 3]   # Translation for source camera
+    R_dst = dst_w2c[:3, :3]  # Rotation for destination camera
+    t_dst = dst_w2c[:3, 3]   # Translation for destination camera
+    
+    # Calculate relative transformation from source to destination
+    R_rel = R_dst @ torch.inverse(R_src)  # Relative rotation
+    t_rel = t_dst - R_rel @ t_src         # Relative translation
+    
+    # Plane normal in source camera coordinates (along z-axis)
+    n = torch.tensor([0., 0., 1.], device=device)
+    
+    # Compute the homography matrix
+    # H = K_dst * R_rel * (I - t_rel*n^T/d) * K_src^-1
+    I = torch.eye(3, device=device)
+    H = K @ R_rel @ (I - torch.outer(t_rel, n) / depth) @ torch.inverse(K)
+
+    
+    # Create pixel coordinates for the source image
+    xs = torch.arange(width, device=device)
+    ys = torch.arange(height, device=device)
+    y_grid, x_grid = torch.meshgrid(ys, xs, indexing='ij')
+    
+    # Create homogeneous coordinates [x, y, 1] for each pixel
+    ones = torch.ones_like(x_grid)
+    homo_coords = torch.stack([x_grid, y_grid, ones], dim=0).float()  # [3, H, W]
+    
+    # Apply the homography to transform pixel coordinates
+    # from source image to destination image
+    warped_coords = H @ homo_coords.reshape(3, -1)  # [3, H*W]
+    warped_coords = warped_coords.reshape(3, height, width)
+    
+    # Normalize the homogeneous coordinates
+    z = warped_coords[2:3, :, :] + 1e-8
+    warped_coords = warped_coords / z
+    
+    # Convert to [-1, 1] range for grid_sample
+    grid_x = 2.0 * warped_coords[0] / (width - 1) - 1.0
+    grid_y = 2.0 * warped_coords[1] / (height - 1) - 1.0
+    grid = torch.stack([grid_x, grid_y], dim=-1)  # [H, W, 2]
+    
+    # Check valid coordinates
+    valid_mask = ((grid_x >= -1.0) & (grid_x <= 1.0) & 
+                  (grid_y >= -1.0) & (grid_y <= 1.0) & 
+                  (z.squeeze(0) > 0))
+    
+    # Warp the image using grid_sample
+    img_tensor = src_img.permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
+    warped_img = F.grid_sample(img_tensor, grid.unsqueeze(0), 
+                              mode='bilinear', 
+                              padding_mode='zeros', 
+                              align_corners=True)
+    warped_img = warped_img[0].permute(1, 2, 0)  # [H, W, 3]
+    
+    # Apply valid mask
+    warped_img = warped_img * valid_mask.unsqueeze(-1).float()
+    
+    # Convert back to original data type if needed
+    if src_img.dtype == torch.uint8:
+        warped_img = (warped_img * 255.0).to(torch.uint8)
+    
+    return warped_img
+
+def compose_images(img_list):
+    """
+    Compose multiple images into a single image, ensuring img_list[0] is in front,
+    followed by img_list[1], img_list[2], etc.
+    
+    Args:
+        img_list: List of tensor images, each with shape [H, W, 3]
+        
+    Returns:
+        composite: Tensor with shape [H, W, 3] representing the composited image
+    """
+    if not img_list:
+        raise ValueError("Image list cannot be empty")
+    
+    height, width, channels = img_list[0].shape
+    device = img_list[0].device
+    dtype = img_list[0].dtype
+    
+    # Initialize composite with zeros
+    composite = torch.zeros(height, width, channels, device=device, dtype=torch.float32)
+    
+    # Create a blank alpha mask to track occupied pixels
+    alpha_mask = torch.zeros(height, width, 1, device=device, dtype=torch.float32)
+    
+    # Process images front to back (img_list[0] first, ensures it's on top)
+    for i in range(len(img_list)):
+        img = img_list[i]
+        
+        # Convert to float for processing if needed
+        if img.dtype != torch.float32:
+            img_float = img.float()
+            if img.dtype == torch.uint8:
+                img_float = img_float / 255.0
+        else:
+            img_float = img
+        
+        # Calculate the alpha (where image has content)
+        img_alpha = (img_float.sum(dim=2, keepdim=True) > 0).float()
+        
+        # For the first image (index 0), directly add it to the composite
+        if i == 0:
+            composite = img_float * img_alpha
+            alpha_mask = img_alpha.clone()
+        else:
+            # For subsequent images, only add where the alpha mask is still empty
+            available_alpha = 1.0 - alpha_mask
+            
+            # Update composite image with new pixels
+            composite = composite + img_float * img_alpha * available_alpha
+            
+            # Update alpha mask
+            alpha_mask = alpha_mask + (img_alpha * available_alpha)
+    
+    # Convert back to original dtype if needed
+    if dtype != torch.float32:
+        if dtype == torch.uint8:
+            composite = (composite * 255.0).to(torch.uint8)
+        else:
+            composite = composite.to(dtype)
+    
+    return composite
