@@ -77,3 +77,17 @@ for masked_rgb, masked_pts in zip(rgb_per_plane, points_per_plane):
     rendered_image = render_image_forward_zbuffer(masked_pts, masked_rgb, w2c0, K, (1024, 1024))
     cv2.imwrite(f"fast_warping/img1_to_img0_slice{i}.png", rendered_image.cpu().numpy()[..., ::-1])
     i += 1
+
+
+# render spiral trajectory
+trajectory_camera = generate_spiral_trajectory(num_points=100, max_distance=-0.6, spiral_radius=0.6, revolutions=2)
+trajectory_camera = torch.cat([trajectory_camera, torch.ones(trajectory_camera.shape[0], 1, device=trajectory_camera.device)], dim=1)
+trajectory_world = (c2w0 @ trajectory_camera.T).T
+spiral_w2c = create_camera_poses_from_trajectory(trajectory_world, c2w0)
+for i in range(len(rgb_per_plane)):
+    os.makedirs(f"fast_warping/slice{i}", exist_ok=True)
+for j in range(len(rgb_per_plane)):
+    for i, w2c in enumerate(spiral_w2c):
+        img_size = (1024, 1024)
+        rendered_image = render_image_forward_zbuffer(points_per_plane[j], rgb_per_plane[j], w2c, K, img_size)
+        cv2.imwrite(f"fast_warping/slice{j}/{i}.png", rendered_image.cpu().numpy()[..., ::-1])
