@@ -1,9 +1,9 @@
 from warp import *
 
-depth0 = torch.from_numpy(load_exr_opencv("scene0_depth.exr"))
-depth1 = torch.from_numpy(load_exr_opencv("scene1_depth.exr"))
-# depth0 = torch.from_numpy(dict(np.load("scene0.exr/scene0_perspective_fov90.npz"))['depth']).unsqueeze(-1).repeat(1, 1, 3)
-# depth1 = torch.from_numpy(dict(np.load("scene1.exr/scene1_perspective_fov90.npz"))['depth']).unsqueeze(-1).repeat(1, 1, 3)
+# depth0 = torch.from_numpy(load_exr_opencv("scene0_depth.exr"))
+# depth1 = torch.from_numpy(load_exr_opencv("scene1_depth.exr"))
+depth0 = torch.from_numpy(dict(np.load("scene0.exr/scene0_perspective_fov90.npz"))['depth']).unsqueeze(-1).repeat(1, 1, 3)
+depth1 = torch.from_numpy(dict(np.load("scene1.exr/scene1_perspective_fov90.npz"))['depth']).unsqueeze(-1).repeat(1, 1, 3)
 
 img0 = torch.from_numpy(load_jpg("scene0_perspective_fov90.jpg"))
 img1 = torch.from_numpy(load_jpg("scene1_perspective_fov90.jpg"))
@@ -27,16 +27,23 @@ w2c1 = c2w1.inverse()[:3, :]
 
 # projection from image and depth map to 3d
 os.makedirs("fast_warping", exist_ok=True)
-pts_camera_cam1, depth1_corrected = backproject_depth(depth1, K.inverse(), img1.shape[1], img1.shape[0], if_mitsuba_depth=True)
+# pts_camera_cam1, depth1_corrected = backproject_depth(depth1, K.inverse(), img1.shape[1], img1.shape[0], if_mitsuba_depth=True)
+pts_camera_cam1 = backproject_depth(depth1, K.inverse(), img1.shape[1], img1.shape[0], if_mitsuba_depth=False)
 pts_world_cam1 = (c2w1.unsqueeze(0).unsqueeze(0) @ pts_camera_cam1.unsqueeze(-1)).squeeze(-1)
 
 
 ### how to solve z buffer?
 # using depth generate mpi for img0
+# mpi_depth_camera = torch.tensor([
+#     [0., 0., 0.5, 1],
+#     [0., 0., 0.7, 1],
+#     [0., 0., 2.7, 1],
+#     [0., 0., 100, 1],
+# ])
 mpi_depth_camera = torch.tensor([
-    [0., 0., 0.5, 1],
-    [0., 0., 0.7, 1],
-    [0., 0., 2.7, 1],
+    [0., 0., 0.76, 1],
+    [0., 0., 2, 1],
+    [0., 0., 4, 1],
     [0., 0., 100, 1],
 ])
 mpi_depth_world = (c2w0.unsqueeze(0).unsqueeze(0) @ mpi_depth_camera.unsqueeze(-1)).squeeze(-1).squeeze(0)
