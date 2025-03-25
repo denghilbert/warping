@@ -231,7 +231,6 @@ def render_image_torch_grid_sample(source_pts, source_rgb, target_w2c, K, img_si
     Returns:
         rendered_img (torch.Tensor): The rendered image with shape (H, W, 3), dtype=torch.uint8
     """
-    import torch.nn.functional as F
     
     # Ensure tensors are on the same device
     device = source_pts.device
@@ -322,6 +321,100 @@ def render_image_torch_grid_sample(source_pts, source_rgb, target_w2c, K, img_si
     rendered_img = (rendered_img * 255).byte()
     
     return rendered_img
+
+def render_image_forward_zbuffer(
+    source_pts,      # (H_src, W_src, 4) homogeneous coords
+    source_rgb,      # (H_src, W_src, 3) uint8
+    target_w2c,      # (4, 4) extrinsic for target camera
+    K,               # (3, 3) intrinsics
+    img_size=(1024, 1024)
+):
+    """
+    Forward-warp rendering with a simple Z-buffer (near surfaces overwrite far).
+    
+    Args:
+        source_pts (torch.Tensor): 
+            Homogeneous source points, shape (H_src, W_src, 4). 
+            The 4th channel is 1 or a scale factor to allow x,y,z = X/W.
+        source_rgb (torch.Tensor):
+            Source color image, shape (H_src, W_src, 3), dtype=torch.uint8.
+        target_w2c (torch.Tensor):
+            4x4 matrix for the *target* camera's world-to-camera transform.
+        K (torch.Tensor):
+            3x3 intrinsics for the *target* camera.
+        img_size (tuple of int):
+            (H, W) specifying the size of the output/rendered image.
+
+    Returns:
+        rendered_img (torch.Tensor):
+            (H, W, 3) dtype=torch.uint8, the final rendered image with occlusion handled.
+    """
+
+    device = source_pts.device
+    H, W = img_size
+    H_src, W_src = source_pts.shape[:2]
+
+    # 1) Convert homogeneous source_pts -> 3D coords
+    pts_xyz = source_pts[..., :3] / torch.clamp(source_pts[..., 3:], min=1e-6)
+
+    # 2) Flatten points + colors
+    points = pts_xyz.view(-1, 3)  # (N, 3)
+    colors = source_rgb.view(-1, 3).float()  # (N, 3) range 0..255
+
+    # 3) Transform to homogeneous
+    ones = torch.ones((points.shape[0], 1), device=device, dtype=torch.float32)
+    points_h = torch.cat([points, ones], dim=-1)  # (N,4)
+
+    # 4) Transform from world -> target camera
+    cam_pts_h = (target_w2c @ points_h.T).T  # (N,4)
+    cam_pts = cam_pts_h[:, :3]               # (N,3)
+
+    # 5) Project into target image plane
+    proj_3d = (K @ cam_pts.T).T  # (N,3)
+    z = torch.clamp(proj_3d[:, 2], min=1e-6)  # (N,)
+
+    # 6) convert to 2D pixel coords
+    xy = proj_3d[:, :2] / z.unsqueeze(-1)  # (N,2)
+    # integer rounding
+    xy_int = xy.round().long()  # (N,2)
+
+    # 7) Filter out points that fall outside the target image or behind camera
+    valid_mask = (
+        (xy_int[:, 0] >= 0) & (xy_int[:, 0] < W) &
+        (xy_int[:, 1] >= 0) & (xy_int[:, 1] < H) &
+        (z > 0)
+    )
+
+    xy_int = xy_int[valid_mask]
+    z_valid = z[valid_mask]
+    colors_valid = colors[valid_mask]
+
+    # 8) Flatten target pixel index: pixel_index = v*W + u
+    #    So each 3D point is mapped to exactly one index in [0..(H*W-1)].
+    pixel_index = xy_int[:, 1] * W + xy_int[:, 0]
+
+    # 9) Sort from far to near => so near points come last and overwrite far points
+    #    (some references prefer near->far + a z-buffer check, but we can do 
+    #     far->near with a single scatter pass).
+    sorted_idx = torch.argsort(z_valid, descending=True)
+
+    pixel_index_sorted = pixel_index[sorted_idx]
+    colors_sorted      = colors_valid[sorted_idx]
+
+    # 10) Scatter the color. 
+    #     Because near points are last in far->near order, they overwrite the far points.
+    rendered_flat = torch.zeros((H*W, 3), device=device, dtype=torch.float32)
+    rendered_flat.scatter_(
+        0,
+        pixel_index_sorted.unsqueeze(-1).expand(-1,3),
+        colors_sorted
+    )
+
+    # 11) Reshape, convert to uint8
+    rendered_img = rendered_flat.view(H, W, 3).clamp(0,255).byte()
+
+    return rendered_img
+
 
 def generate_spiral_trajectory(num_points=100, max_distance=1.0, spiral_radius=0.2, revolutions=2, device='cpu'):
     """
